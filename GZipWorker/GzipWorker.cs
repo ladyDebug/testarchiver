@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
-using System.Security.Cryptography;
 using System.Threading;
 
 namespace GZipWorker
@@ -18,7 +17,6 @@ namespace GZipWorker
         private volatile int _threadAmount;
         private int _chunkSize;
         private volatile int _fileChunkCount;
-        private long _fileLength;
         private int _threadCount;
 
         public GzipWorker()
@@ -41,7 +39,6 @@ namespace GZipWorker
             var fileInfo = new FileInfo(fileToArchive);
 
             _chunkSize = 128*1024;
-            _fileLength = fileInfo.Length;
             _fileChunkCount = (int) Math.Ceiling((decimal) fileInfo.Length/_chunkSize);
             Console.WriteLine("fileChunkCount {0}", _fileChunkCount);
 
@@ -59,7 +56,6 @@ namespace GZipWorker
                     Console.WriteLine("_threadAmount: " + _threadAmount);
                     new Thread(() => { GetOffset(fileInfo); }).Start();
                     idx++;
-                    //GetOffset(fileInfo);
                     _threadAmount--;
                 }
                 else
@@ -147,19 +143,15 @@ namespace GZipWorker
 
         private void ArchiveChunk(byte[] bytes,int index)
         {
-            byte[] completedBytes = new byte[bytes.Length+1];
-            Buffer.BlockCopy(bytes, 0, completedBytes, 0, bytes.Length);
-            //Buffer.BlockCopy(new byte[1], 0, completedBytes, bytes.Length, 1);
-
             using (var outStream = new MemoryStream())
             {
                 using (var tinyStream = new GZipStream(outStream, CompressionMode.Compress, false))
                 {
-                    tinyStream.Write(completedBytes, 0, completedBytes.Length);
-                    byte[] arr = outStream.ToArray();
-                    AddToDictionary(index, arr);
-                    Console.WriteLine("Written to dict file chunk index {0} size: {1}", index, arr.Length);
+                    tinyStream.Write(bytes, 0, bytes.Length);
                 }
+                byte[] arr = outStream.ToArray();
+                AddToDictionary(index, arr);
+                Console.WriteLine("Written to dict file chunk index {0} size: {1}", index, arr.Length);
             }
             _threadAmount++;
         }
@@ -170,22 +162,31 @@ namespace GZipWorker
             ReadChunk((FileInfo) fileInfo);
         }
 
-        private void StartArchiveWriter(String fileName)
+        private void StartArchiveWriter(string fileName)
         {
             new FileStream(fileName, FileMode.Create).Close();
-            while (true)
-            {
-                
-                if (_chunksDict.ContainsKey(_chunkIndexWritten))
+             //using (var fsAppend = new FileStream(fileName, FileMode.Append))
+
+             {
+                 bool res = true;
+                while (res)
                 {
-                    var archivedStream = _chunksDict[_chunkIndexWritten];
-                    Write(FormatBytesForIndex(_chunkIndexWritten, archivedStream), fileName);
-                    RemoveFromDictionary(_chunkIndexWritten);
-                    _chunkIndexWritten++;
-                }
-                else
-                {
-                    Thread.Sleep(100);
+                    if (_chunksDict.ContainsKey(_chunkIndexWritten))
+                    {
+                        var archivedStream = _chunksDict[_chunkIndexWritten];
+                        var archivedBytes = FormatBytesForIndex(_chunkIndexWritten, archivedStream);
+                        Write(archivedBytes, fileName);
+                        RemoveFromDictionary(_chunkIndexWritten);
+                        _chunkIndexWritten++;
+                        if (_chunkIndexWritten >= _fileChunkCount)
+                        {
+                            res = false;
+                        }
+                    }
+                    else
+                    {
+                        Thread.Sleep(100);
+                    }
                 }
             }
         }
@@ -229,26 +230,15 @@ namespace GZipWorker
                     var readBytes = stream.Read(buffer, 0, buffer.Length);
                     while (readBytes > 0)
                     {
+
+
                         fsAppend.Write(buffer, 0, readBytes);
-                        Console.WriteLine("");
-                        Console.WriteLine("");
-                        Console.WriteLine("");
-                        Console.WriteLine("");
-                        string v = System.Text.Encoding.Default.GetString(buffer);
-                        char vlast = v[v.Length - 1];
-                        string last = v.Substring(v.Length-20,20);
-                        Console.WriteLine("v last val {0}",vlast);
-                        Console.WriteLine("last string {0}", last);
-                        Console.WriteLine(v);
                         fsAppend.Flush();
                         readBytes = stream.Read(buffer, 0, buffer.Length);
                     }
                     Console.WriteLine("_chunkIndexWritten: {0}", _chunkIndexWritten);
                     RemoveFromDecompressedDictionary(_chunkIndexWritten);
-                    //if (_chunkIndexWritten==2)
-                    //    Environment.Exit(0);
-
-                    _chunkIndexWritten++;
+                   _chunkIndexWritten++;
                     
                 }
                 stream.Close();
@@ -261,6 +251,7 @@ namespace GZipWorker
 
         private void ReadArchivedFile(FileInfo fileInfo)
         {
+            _fileChunkCount = 0;
             var offset = 0;
             using (var stream = fileInfo.OpenRead())
             {
@@ -269,13 +260,13 @@ namespace GZipWorker
                     while (offset <= fileInfo.Length)
                     {
                         var indexBytes = new byte[4];
-                        //  stream.Seek(offset, SeekOrigin.Begin);
                         stream.Read(indexBytes, 0, 4);
                         var sizeToRead = BitConverter.ToInt32(indexBytes, 0);
                         var bytes = new byte[sizeToRead];
                         var readBytes = stream.Read(bytes, 0, sizeToRead);
                         offset += (readBytes + 4);
                         AddToDictionary(_currentIndex, bytes);
+                        _fileChunkCount ++;
                         _currentIndex++;
                     }
                 }
@@ -289,16 +280,24 @@ namespace GZipWorker
         private void WriteUnarchivedFile(string fileName)
         {
             new FileStream(fileName, FileMode.Create).Close();
-            while (true)
+            //using (var fsAppend = new FileStream(fileName, FileMode.Append))
             {
-                if (_decompressedChunksDict.ContainsKey(_chunkIndexWritten))
+                var res = true;
+                while (res)
                 {
-                    var archivedStream = _decompressedChunksDict[_chunkIndexWritten];
-                    WriteDecompress(archivedStream, fileName);
-                }
-                else
-                {
-                    Thread.Sleep(100);
+                    if (_decompressedChunksDict.ContainsKey(_chunkIndexWritten))
+                    {
+                        var archivedStream = _decompressedChunksDict[_chunkIndexWritten];
+                        WriteDecompress(archivedStream, fileName);
+                        if (_chunkIndexWritten >= _fileChunkCount)
+                        {
+                            res = false;
+                        }
+                    }
+                    else
+                    {
+                        Thread.Sleep(100);
+                    }
                 }
             }
         }
@@ -321,7 +320,7 @@ namespace GZipWorker
                 if (_threadAmount > 0)
                 {
                     Console.WriteLine("_threadAmount: " + _threadAmount);
-                    new Thread(() => { RunDecompressor(); }).Start();
+                    new Thread(RunDecompressor).Start();
                     _threadAmount--;
                 }
                 else
